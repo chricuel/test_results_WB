@@ -1,0 +1,217 @@
+---
+title: "R skills results"
+author: Christian Cuellar
+date: "2023-11-13"
+format: html
+editor: visual
+---
+
+## Introduction
+
+This document shows the results of the R skills assessment.
+
+```{r echo=FALSE, results='hide'}
+library(ggplot2)
+library(scales)
+library(tidyverse)
+library(DT)
+library(Hmisc)
+library(scales)
+library(forcats)
+library(waldo)
+
+```
+
+```{r echo=FALSE, results='hide'}
+
+#Reading data
+tag      <- "master"
+base_url <- "https://github.com/randrescastaneda/pub_data/raw/"
+data_url <- paste0(base_url, tag, "/data/Rtest1/")
+
+wdi <-
+  readr::read_rds(paste0(data_url, "wdi_in1.Rds"))
+
+
+```
+
+## 1. Summary statistics of GDP per capita by region
+
+The following table presents a statistical summary of the GDP per capita across different regions and years. Each row corresponds to a specific region-year and displays key descriptive metrics that characterize the distribution of GDP per capita within that region. The metrics include the mean, standard deviation (variability), minimum, and maximum values.
+
+```{r}
+
+summary_stats <- wdi %>%
+  group_by(region, date) %>%
+  summarise(N = n(),
+            Mean = comma(round(sum(gdp * pop, na.rm = TRUE) / sum(pop[!is.na(gdp)], na.rm = TRUE), 0)),
+            SD = comma(round(sqrt(wtd.var(gdp[!is.na(gdp) & !is.na(pop)], pop[!is.na(gdp) & !is.na(pop)])), 0)), 
+            Min = comma(round(min(gdp, na.rm = TRUE), 0)),
+            Max = comma(round(max(gdp, na.rm = TRUE), 0))
+            )
+
+DT::datatable(summary_stats, filter = 'top', 
+          options = list( pageLength = 10, autoWidth = TRUE)) 
+
+
+
+```
+
+```{r echo=FALSE, results='hide'}
+# Differences are related to rounding data
+wdi_summ_out <- readr::read_rds(paste0(data_url, "wdi_summ_out.Rds"))
+difference <- waldo::compare(wdi_summ_out, summary_stats)
+```
+
+## 2. Aggregate stats
+
+The following table presents the aggregated statistics the GDP per capita across, life expectancy, and population living in poverty. The metrics include the mean, standard deviation, minimum, maximum and mean values.
+
+```{r}
+
+agg_stats <- wdi %>%
+  group_by(region, date) %>%
+  summarise(  mean_lifeex = sum(lifeex * pop, na.rm = TRUE) / sum(pop[!is.na(lifeex)], na.rm = TRUE),
+            sd_lifeex = sqrt(wtd.var(lifeex[!is.na(lifeex) & !is.na(pop)], pop[!is.na(lifeex) & !is.na(pop)])),
+            min_lifeex = min(lifeex, na.rm = TRUE),
+            max_lifeex = max(lifeex, na.rm = TRUE),
+            median_lifeex = median(lifeex, na.rm = TRUE),
+
+            mean_gdp = sum(gdp * pop, na.rm = TRUE) / sum(pop[!is.na(gdp)], na.rm = TRUE),
+            sd_gdp = sqrt(wtd.var(gdp[!is.na(gdp) & !is.na(pop)], pop[!is.na(gdp) & !is.na(pop)])), 
+            min_gdp = min(gdp, na.rm = TRUE),
+            max_gdp = max(gdp, na.rm = TRUE),
+            median_gdp = median(gdp, na.rm = TRUE),
+            
+            mean_povintl = sum(pov_intl*pop, na.rm = TRUE) / sum(pop[!is.na(gdp)], na.rm = TRUE),
+            sd_povintl = sqrt(wtd.var(pov_intl[!is.na(pov_intl) & !is.na(pop)], pop[!is.na(pov_intl) & !is.na(pop)])),
+            min_povintl = min(pov_intl, na.rm = TRUE),
+            max_povintl = max(pov_intl, na.rm = TRUE),
+            median_povintl = median(pov_intl, na.rm = TRUE),
+            
+            population = sum(pop, na.rm = TRUE)
+
+            )
+
+agg_stats_long <- agg_stats %>%
+  pivot_longer(
+    cols = -c(region, date, population), 
+    names_to = c("estimate", ".value"),
+    names_pattern = "(.+)_(.+)"
+  ) %>%
+  rename(pop = population, pov_intl = povintl) %>%
+  select(estimate, region, date, pop, lifeex, gdp, pov_intl) %>%
+  mutate(estimate = fct_relevel(estimate, "mean", "sd", "min", "max", "median")) %>%
+  arrange(estimate)
+
+DT::datatable(agg_stats_long, filter = 'top', 
+          options = list( pageLength = 10, autoWidth = TRUE)) 
+
+
+```
+
+## 3. Find outliers
+
+```{r}
+
+
+mean_sd_year <- wdi %>%
+  group_by(date) %>%
+  summarise(
+    
+  # Omit NA values in both pop and gdp variables
+  mean_gdp = sum(gdp * pop, na.rm = TRUE) / sum(pop[!is.na(gdp)], na.rm = TRUE),
+  sd_gdp = sqrt(wtd.var(gdp[!is.na(gdp) & !is.na(pop)], pop[!is.na(gdp) & !is.na(pop)])),
+    
+  mean_lifeex = sum(lifeex * pop, na.rm = TRUE) / sum(pop[!is.na(lifeex)], na.rm = TRUE),
+  sd_lifeex = sqrt(wtd.var(lifeex[!is.na(lifeex) & !is.na(pop)], pop[!is.na(lifeex) & !is.na(pop)])),
+
+  mean_gini = sum(gini * pop, na.rm = TRUE) / sum(pop[!is.na(gini)], na.rm = TRUE),
+  sd_gini = sqrt(wtd.var(gini[!is.na(gini) & !is.na(pop)], pop[!is.na(gini) & !is.na(pop)])),
+  )
+
+
+wdi_outliers <- wdi %>%
+  left_join(mean_sd_year, by = "date")
+
+wdi_outliers <- wdi_outliers %>%
+ mutate(
+    ll_gdp = gdp < (mean_gdp - 2.5 * sd_gdp),
+    hl_gdp = gdp > (mean_gdp + 2.5 * sd_gdp),
+    ll_lifeex = lifeex < (mean_lifeex - 2.5 * sd_lifeex),
+    hl_lifeex = lifeex > (mean_lifeex + 2.5 * sd_lifeex),
+    ll_gini = gini < (mean_gini - 2.5 * sd_gini),
+    hl_gini = gini > (mean_gini + 2.5 * sd_gini)
+  )
+
+mean_sd_year <- mean_sd_year %>%
+  mutate(
+    ll_lifeex = mean_lifeex - (2.5 * sd_lifeex), 
+    hl_lifeex = mean_lifeex + (2.5 * sd_lifeex)  
+  )
+
+ggplot() +
+  geom_point(data = wdi_outliers, aes(x = date, y = lifeex, color = region)) + 
+    geom_ribbon(data = mean_sd_year, aes(x = date, ymin = ll_lifeex, ymax = hl_lifeex), alpha = 0.2) +
+  geom_line(data = mean_sd_year, aes(x = date, y = mean_lifeex)) + 
+  theme_minimal() +
+  labs(x = "Year", y = "Life Expectancy", color = "Region")
+
+outliers_results <- readr::read_rds(paste0(data_url, "wdi_outliers_out.Rds"))
+
+
+```
+
+## 4. Poverty measures
+
+```{r}
+l_svy <-
+    readr::read_rds(paste0(data_url, "svy_sim_in1.Rds"))
+
+
+poverty_measures <- as.data.frame(l_svy)
+
+
+thresholds <- c(2.15, 3.65, 6.85)
+years <- 2001:2010  
+
+poverty_headcounts <- list()
+
+for (year in years) {
+  year_data <- l_svy[[paste0("Y", year)]]
+  total_count <- nrow(year_data)
+  
+  headcounts <- sapply(thresholds, function(threshold) sum(year_data$income < threshold, na.rm = TRUE))
+
+    proportions <- headcounts / total_count
+  
+  poverty_headcounts[[as.character(year)]] <- proportions
+}
+
+
+poverty_headcount_df <- do.call(rbind, poverty_headcounts)
+rownames(poverty_headcount_df) <- paste0(years)
+colnames(poverty_headcount_df) <- paste0(thresholds)
+
+
+poverty_headcount_df <- as.data.frame(poverty_headcount_df)
+
+poverty_headcount_df$year <- rownames(poverty_headcount_df)
+rownames(poverty_headcount_df) <- NULL  
+
+poverty_headcount_long <- poverty_headcount_df %>%
+  pivot_longer(
+    cols = -year,  
+    names_to = "pov_line", 
+    values_to = "headcount"
+  )
+
+
+DT::datatable(poverty_headcount_long, filter = 'top', 
+          options = list( pageLength = 10, autoWidth = TRUE)) 
+
+```
+
+## 5. Lorenz curve
+
+## 6. Gini coefficient
