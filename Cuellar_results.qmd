@@ -19,6 +19,8 @@ library(Hmisc)
 library(scales)
 library(forcats)
 library(waldo)
+library(wbpip)
+library(purrr)
 
 ```
 
@@ -168,50 +170,101 @@ outliers_results <- readr::read_rds(paste0(data_url, "wdi_outliers_out.Rds"))
 l_svy <-
     readr::read_rds(paste0(data_url, "svy_sim_in1.Rds"))
 
+# Use a library available on Github from the World Bank
+source("https://raw.githubusercontent.com/PIP-Technical-Team/wbpip/master/R/md_compute_poverty_stats.R")
 
-poverty_measures <- as.data.frame(l_svy)
+l_svy_df <- l_svy %>%
+  enframe(name = "year", value = "data") %>%
+  unnest(data)
 
+poverty_lines <- c(2.15, 3.65, 6.85)
 
-thresholds <- c(2.15, 3.65, 6.85)
-years <- 2001:2010  
+# Create a dataframe with all combinations of year and poverty line
+expanded_df <- l_svy_df %>%
+  ungroup() %>%
+  expand(year, poverty_line = poverty_lines)
 
-poverty_headcounts <- list()
+# Apply md_compute_poverty_stats
+results_list <- lapply(1:nrow(expanded_df), function(i) {
+  row <- expanded_df[i, ]
+  data <- l_svy[[row$year]]
+  poverty_line <- row$poverty_line
+  result <- md_compute_poverty_stats(data[["income"]], data[["weight"]], poverty_line)
+  c(year = row$year, pov_line = poverty_line, result)
+})
 
-for (year in years) {
-  year_data <- l_svy[[paste0("Y", year)]]
-  total_count <- nrow(year_data)
-  
-  headcounts <- sapply(thresholds, function(threshold) sum(year_data$income < threshold, na.rm = TRUE))
-
-    proportions <- headcounts / total_count
-  
-  poverty_headcounts[[as.character(year)]] <- proportions
-}
-
-
-poverty_headcount_df <- do.call(rbind, poverty_headcounts)
-rownames(poverty_headcount_df) <- paste0(years)
-colnames(poverty_headcount_df) <- paste0(thresholds)
-
-
-poverty_headcount_df <- as.data.frame(poverty_headcount_df)
-
-poverty_headcount_df$year <- rownames(poverty_headcount_df)
-rownames(poverty_headcount_df) <- NULL  
-
-poverty_headcount_long <- poverty_headcount_df %>%
-  pivot_longer(
-    cols = -year,  
-    names_to = "pov_line", 
-    values_to = "headcount"
-  )
+# Convert the list to a dataframe
+results_df <- do.call(rbind, results_list) %>%
+  as.data.frame(stringsAsFactors = FALSE) 
 
 
-DT::datatable(poverty_headcount_long, filter = 'top', 
+DT::datatable(results_df, filter = 'top', 
           options = list( pageLength = 10, autoWidth = TRUE)) 
 
 ```
 
 ## 5. Lorenz curve
 
+```{r}
+
+lorenz <- function(income, weights) {
+  data <- tibble(Income = income, Weights = weights)
+
+  # Calculate weighted income and sort
+  data <- data %>% 
+    mutate(WeightedIncome = Income * Weights) %>%
+    arrange(Income)
+
+  # Calculate cumulative weights and cumulative weighted income
+  data <- data %>%
+    mutate(CumulativeWeight = cumsum(Weights),
+           CumulativeIncome = cumsum(WeightedIncome))
+
+  # Total weights and total income
+  total_weight <- sum(data$Weights)
+  total_income <- sum(data$WeightedIncome)
+
+  # Divide data into 100 bins based on cumulative weights
+  bin_edges <- seq(0, total_weight, length.out = 101)
+  data_bins <- map2_df(bin_edges[-length(bin_edges)], bin_edges[-1], ~{
+    bin_start <- .x
+    bin_end <- .y
+    bin_data <- data %>%
+      filter(CumulativeWeight > bin_start, CumulativeWeight <= bin_end)
+    tibble(
+      PopulationShare = bin_end / total_weight,
+      IncomeShare = sum(bin_data$WeightedIncome) / total_income
+    )
+  })
+
+  return(PopulationShare, IncomeShare, data_bins)
+}
+```
+
 ## 6. Gini coefficient
+
+```{r}
+
+# I found a function from the World Bank in R that computes  Gini coefficient:
+
+md_compute_gini <- function(welfare, weight) {
+
+  # Compute weighted welfare
+  weighted_welfare <- welfare * weight
+  weighted_welfare_lag <- collapse::flag(weighted_welfare, fill = 0)
+
+  # Compute area under the curve using
+  # Area of trapezoid = Base * Average height
+  v <- (cumsum(weighted_welfare_lag) + (weighted_welfare / 2)) * weight
+  auc <- sum(v) # Area Under the Curve
+
+  # Compute Area Under the Lorenz Curve
+  # Normalize auc so it is always between 0 and 0.5
+  auc <- (auc / sum(weight)) / sum(weighted_welfare)
+
+  # Compute Gini
+  gini <- 1 - (2 * auc)
+
+  return(gini)
+}
+```
